@@ -25,9 +25,10 @@ shakes the new turns too (idempotent on already-shaken content).
 
 ## Footer status
 
-The extension publishes one compact status group: `↻ ⚒121.4k ▧1 ◇421`.
-`⚒` is the estimated removable tool/bash/long-text tokens, `▧` the removable
-image count, and `◇` the removable thinking tokens. It refreshes on session
+The extension publishes one compact status group: `↻ ⚒ 121.4k  1 ◇ 421`.
+`⚒` is the estimated removable tool/bash/long-text tokens, `` the removable
+image count (Nerd Font `nf-fa-image`, U+F03E), and `◇` the removable thinking
+tokens. Each icon is separated from its count by a space. It refreshes on session
 load, completed turns, tree navigation, compaction, model changes, and shakes.
 `/shake status` shows the full details as a notification, not a persistent widget.
 

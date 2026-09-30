@@ -648,7 +648,7 @@ export default function (pi: ExtensionAPI) {
       const tokens = estTokens(chars);
       return tokens < 1000 ? fmt(tokens) : `${(tokens / 1000).toFixed(1)}k`;
     };
-    const text = `↻ ⚒${shortTokens(stats.toolChars + stats.bashChars + stats.blockChars)} ▧${stats.imageCount} ◇${shortTokens(stats.thinkingChars)}`;
+    const text = `↻ ⚒ ${shortTokens(stats.toolChars + stats.bashChars + stats.blockChars)}  ${stats.imageCount} ◇ ${shortTokens(stats.thinkingChars)}`;
     ctx.ui.setStatus("pi-shake", ctx.ui.theme.fg("muted", text));
   };
   const refreshStatus = (_event: unknown, ctx: ExtensionContext): void => updateStatus(ctx);

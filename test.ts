@@ -415,18 +415,18 @@ const b64 = (n: number): string => Buffer.from(big(n)).toString("base64");
   } as unknown as ExtensionCommandContext;
   await handlers.get("session_start")!({} as never, uiCtx);
   check("old widget cleared on load", widget === undefined);
-  check("footer contains compact removable counts", status === "↻ ⚒14.8k ▧1 ◇1.0k", status);
+  check("footer contains compact removable counts with icon spacing", status === "↻ ⚒ 14.8k  1 ◇ 1.0k", status);
   notifications.length = 0;
   await command!.handler("status", uiCtx);
   check("status details are a notification, not a widget", notifications[0]?.includes("removable now:") === true && widget === undefined);
   uiCtx.model = { api: "anthropic-messages" } as typeof uiCtx.model;
   await handlers.get("model_select")!({} as never, uiCtx);
-  check("footer respects signed-thinking safety", status?.endsWith("◇0") === true);
+  check("footer respects signed-thinking safety", status?.endsWith("◇ 0") === true);
   entries = [];
   for (const event of ["agent_end", "session_tree", "session_compact", "session_start"]) {
     status = "stale";
     await handlers.get(event)!({} as never, uiCtx);
-    check(`${event} refreshes footer`, status === "↻ ⚒0 ▧0 ◇0");
+    check(`${event} refreshes footer`, status === "↻ ⚒ 0  0 ◇ 0");
   }
   status = undefined;
   await handlers.get("agent_end")!({} as never, ctx);
