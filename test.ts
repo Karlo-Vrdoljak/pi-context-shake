@@ -361,8 +361,11 @@ const b64 = (n: number): string => Buffer.from(big(n)).toString("base64");
 // --- Scenario 14: command routing ------------------------------------------
 {
   let command: Parameters<ExtensionAPI["registerCommand"]>[1] | undefined;
+  const handlers = new Map<string, (event: never, ctx: ExtensionCommandContext) => unknown>();
   extension({
-    on() {},
+    on(name: string, handler: (event: never, ctx: ExtensionCommandContext) => unknown) {
+      handlers.set(name, handler);
+    },
     registerCommand(name: string, registered: NonNullable<typeof command>) {
       check("shake command registered", name === "shake");
       command = registered;
@@ -389,6 +392,45 @@ const b64 = (n: number): string => Buffer.from(big(n)).toString("base64");
   notifications.length = 0;
   await command!.handler("invalid", ctx);
   check("unknown mode suggests status", notifications[0]?.includes("all, status") === true);
+
+  // Footer updates use the same estimate as /shake status, without leaving a widget.
+  let status: string | undefined;
+  let widget: string[] | undefined = ["old widget"];
+  let entries: EntryLike[] = [
+    { type: "message", message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: big(40_000) }] } },
+    { type: "message", message: { role: "user", content: big(20_000) } },
+    { type: "message", message: { role: "user", content: [{ type: "image", data: b64(1000), mimeType: "image/png" }] } },
+    { type: "message", message: { role: "assistant", content: [{ type: "thinking", thinking: big(4000), thinkingSignature: "sig" }] } },
+  ];
+  const uiCtx = {
+    ...ctx,
+    hasUI: true,
+    sessionManager: { getEntries: () => entries },
+    ui: {
+      notify: (text: string) => notifications.push(text),
+      theme: { fg: (_color: string, text: string) => text },
+      setStatus: (key: string, text: string | undefined) => { if (key === "pi-shake") status = text; },
+      setWidget: (_key: string, content: string[] | undefined) => { widget = content; },
+    },
+  } as unknown as ExtensionCommandContext;
+  await handlers.get("session_start")!({} as never, uiCtx);
+  check("old widget cleared on load", widget === undefined);
+  check("footer contains compact removable counts with icon spacing", status === "↻ ⚒ 14.8k  1 ◇ 1.0k", status);
+  notifications.length = 0;
+  await command!.handler("status", uiCtx);
+  check("status details are a notification, not a widget", notifications[0]?.includes("removable now:") === true && widget === undefined);
+  uiCtx.model = { api: "anthropic-messages" } as typeof uiCtx.model;
+  await handlers.get("model_select")!({} as never, uiCtx);
+  check("footer respects signed-thinking safety", status?.endsWith("◇ 0") === true);
+  entries = [];
+  for (const event of ["agent_end", "session_tree", "session_compact", "session_start"]) {
+    status = "stale";
+    await handlers.get(event)!({} as never, uiCtx);
+    check(`${event} refreshes footer`, status === "↻ ⚒ 0  0 ◇ 0");
+  }
+  status = undefined;
+  await handlers.get("agent_end")!({} as never, ctx);
+  check("no footer update without UI", status === undefined);
 }
 console.log(failures === 0 ? "\nall tests passed" : `\n${failures} test(s) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
