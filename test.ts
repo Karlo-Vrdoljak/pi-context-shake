@@ -1,6 +1,9 @@
 /**
  * Engine tests for pi-shake. Run: bun test.ts
  */
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import extension, { shakeMessages, canDropSignedThinking, rebuildEntries, estimateMessageTokens, shouldSkipAutoCompaction } from "./index.ts";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { ShakeMessage, ShakeModes, ShakeOptions, EntryLike } from "./index.ts";
@@ -382,7 +385,7 @@ const b64 = (n: number): string => Buffer.from(big(n)).toString("base64");
   for (const args of ["", "  ", "all", "tools", "images", "thinking"]) {
     notifications.length = 0;
     await command!.handler(args, ctx);
-    check(`/${args ? `shake ${args}` : "shake"} routes to rebuild`, notifications[0]?.includes("wait for the agent") === true);
+    check(`/${args ? `shake ${args}` : "shake"} queues a rebuild`, notifications[0]?.includes("queued") === true);
   }
   notifications.length = 0;
   await command!.handler(" STATUS ", ctx);
@@ -431,6 +434,95 @@ const b64 = (n: number): string => Buffer.from(big(n)).toString("base64");
   status = undefined;
   await handlers.get("agent_end")!({} as never, ctx);
   check("no footer update without UI", status === undefined);
+}
+
+// --- Scenario 15: mid-turn shakes run once after full settlement ------------
+{
+  let command: Parameters<ExtensionAPI["registerCommand"]>[1] | undefined;
+  const handlers = new Map<string, (event: never, ctx: ExtensionCommandContext) => unknown>();
+  extension({
+    on: (name: string, handler: (event: never, ctx: ExtensionCommandContext) => unknown) => handlers.set(name, handler),
+    registerCommand: (_name: string, registered: NonNullable<typeof command>) => { command = registered; },
+  } as unknown as ExtensionAPI);
+  const dir = mkdtempSync(join(tmpdir(), "pi-shake-test-"));
+  const file = join(dir, "session.jsonl");
+  const originalEntries: EntryLike[] = [
+    { type: "session", version: 3, id: "session" },
+    { type: "message", id: "u", parentId: null, message: { role: "user", content: "look" } },
+    { type: "message", id: "a", parentId: "u", message: { role: "assistant", content: [{ type: "toolCall", id: "c", name: "read", arguments: {} }] } },
+    { type: "message", id: "t", parentId: "a", message: { role: "toolResult", toolCallId: "c", toolName: "read", content: [{ type: "text", text: big(40_000) }, { type: "image", data: b64(1000), mimeType: "image/png" }] } },
+  ];
+  const original = originalEntries.map((e) => JSON.stringify(e)).join("\n") + "\n";
+  let entries = originalEntries;
+  let idle = false;
+  let rereads = 0;
+  const notices: { text: string; type: string }[] = [];
+  const ctx = {
+    isIdle: () => idle,
+    hasUI: false,
+    getContextUsage: () => undefined,
+    sessionManager: {
+      getEntries: () => entries,
+      getSessionFile: () => file,
+      getLeafId: () => "t",
+      setSessionFile: (path: string) => {
+        check("re-read only happens while idle", idle);
+        rereads++;
+        entries = readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      },
+    },
+    ui: {
+      notify: (text: string, type: string) => notices.push({ text, type }),
+      setWidget: () => {},
+    },
+  } as unknown as ExtensionCommandContext;
+  try {
+    writeFileSync(file, original);
+    for (const mode of ["tools", "images", "tools"]) await command!.handler(mode, ctx);
+    check("busy shakes acknowledge queue instead of warning", notices.length === 3 && notices.every((n) => n.type === "info" && n.text.includes("queued")));
+    check("busy shakes leave disk and live history untouched", readFileSync(file, "utf8") === original && rereads === 0);
+    await handlers.get("agent_end")?.({} as never, ctx);
+    await handlers.get("agent_settled")?.({} as never, ctx);
+    check("agent_end and a busy boundary do not drain the queue", readFileSync(file, "utf8") === original && rereads === 0);
+    // Simulate a retry/continuation finishing after agent_end.
+    const finalEntry: EntryLike = { type: "message", id: "final", parentId: "t", message: { role: "assistant", content: [{ type: "thinking", thinking: big(4000) }, { type: "text", text: "done" }] } };
+    writeFileSync(file, original + JSON.stringify(finalEntry) + "\n");
+    entries = [...originalEntries, finalEntry];
+    await command!.handler("thinking", ctx);
+    idle = true;
+    await handlers.get("agent_settled")?.({} as never, ctx);
+    const state = entries.find((e) => e.customType === "pi-shake")?.data as { modes?: ShakeModes } | undefined;
+    check("queued requests merge all requested modes into one rebuild", rereads === 1 && state?.modes?.tools === true && state.modes.images && state.modes.thinking);
+    const shaken = readFileSync(file, "utf8");
+    check("queued rebuild includes the completed continuation", shaken.includes("[shaken:") && !shaken.includes('"type":"image"') && !shaken.includes('"type":"thinking"') && shaken.includes('"id":"final"'));
+    notices.length = 0;
+    await handlers.get("agent_settled")?.({} as never, ctx);
+    check("settlement drains pending shake exactly once", rereads === 1 && notices.length === 0);
+    await command!.handler("all", ctx);
+    check("idle shake still executes immediately", notices[0]?.text === "Nothing to shake in history.");
+    for (const event of ["session_shutdown", "session_start"]) {
+      writeFileSync(file, original);
+      entries = originalEntries;
+      idle = false;
+      await command!.handler("", ctx);
+      await handlers.get(event)?.({} as never, ctx);
+      idle = true;
+      await handlers.get("agent_settled")?.({} as never, ctx);
+      check(`${event} clears queued shakes`, readFileSync(file, "utf8") === original && rereads === 1);
+    }
+    idle = false;
+    await command!.handler("tools", ctx);
+    writeFileSync(file, "not json\n");
+    notices.length = 0;
+    idle = true;
+    await handlers.get("agent_settled")?.({} as never, ctx);
+    check("queued rebuild reports file errors without modifying history", notices[0]?.type === "error" && notices[0].text.includes("unparseable") && readFileSync(file, "utf8") === "not json\n");
+    notices.length = 0;
+    await handlers.get("agent_settled")?.({} as never, ctx);
+    check("failed queued rebuild is not retried on every settlement", notices.length === 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 console.log(failures === 0 ? "\nall tests passed" : `\n${failures} test(s) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
